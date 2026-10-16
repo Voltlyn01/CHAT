@@ -63,24 +63,33 @@ To defend against active MITM on the signaling channel:
 - **Additional Authenticated Data (AAD)**:
   $$\text{AAD} = \text{UTF-8}(\text{roomId} \parallel \text{":"} \parallel \text{senderId} \parallel \text{":"} \parallel \text{seq})$$
 - **Decryption & Verification**: If any byte of the ciphertext, IV, tag, or AAD is modified, `crypto.subtle.decrypt()` fails, the message is rejected, and a security warning is logged.
+- **Relay Transport Security**: When messages are relayed via WebRTC TURN or the server signaling coordinator, genuine AES-256-GCM E2EE is strictly preserved. Neither the TURN relay nor the signaling server possesses the cryptographic keys or plaintext. Plaintext fallback is structurally prohibited.
 
 ---
 
 ## 3. Room Authorization & Participant Admission Control
 
-- **Strict Limit**: Maximum of 2 participants per room.
-- **Admission Enforcement**:
-  - Participant 1 is the room creator.
-  - Participant 2 is the invited guest who connects with the matching room code.
-  - When a third client connects to the room host, the host immediately transmits:
-    `{ type: "ROOM_FULL", message: "This room is full. Only two participants are allowed." }`
-    and closes the connection.
-  - The third participant is rejected before any key exchange occurs.
+- **Strict Limit**: Exactly 2 authorized participants at most (1 creator and 1 admitted guest).
+- **Server-Side Enforcement**:
+  - The room creator is assigned an unguessable 256-bit `creatorSecret` generated via `crypto.randomBytes(32)` on room creation.
+  - Creator actions (`ADMIT_GUEST`, `REMOVE_GUEST`, `CLEAR_CHAT`) require this secret and are validated strictly on the server.
+  - A prospective guest requests admission (`REQUEST_ADMISSION`).
+  - Only when the creator accepts (`ADMIT_GUEST`), the server issues a cryptographically random, ephemeral `guestToken`.
+  - While the room is occupied by creator and guest, any 3rd participant attempting to connect is immediately rejected by the server with `ROOM_FULL`.
+  - The room creator can remove the guest (`REMOVE_GUEST`) at any time. The server immediately revokes the guest's token, adds it to a blacklist, terminates the guest's connection, and prevents reconnection with stale credentials.
+  - After a guest leaves or is removed, the creator may admit a different guest, but never more than one concurrent guest.
 
 ---
 
-## 4. Zero Message Persistence & Expiration Lifecycle Policy
+## 4. Zero Message Persistence, Expiration & Clear Chat Lifecycle
 
+- **CLEAR CHAT FOR BOTH**:
+  - Either participant can trigger a complete room chat wipe.
+  - VanishText requires explicit confirmation before initiating the clear.
+  - When confirmed, a `CLEAR_CHAT` command is sent to the server coordinator.
+  - The server records `room.clearedAt = Date.now()` and broadcasts `CHAT_CLEARED` to both peers.
+  - Both clients immediately purge all in-memory chat messages, cancel all active message deletion timers, wipe the DOM, and update their local `lastClearedTimestamp`.
+  - **Replay / Delayed Message Defense**: Any in-flight or delayed messages with timestamp $\le \text{clearedAt}$ are automatically dropped by both server and clients, preventing cleared messages from reappearing after network delays or reconnection.
 - **Independent 15-Minute Message Deletion**: Every message automatically disappears from both users' chat screens exactly 15 minutes after it was sent. Each message maintains its own independent 15-minute timer based on verified creation time, with background active sweepers enforcing removal even after tab sleep or background throttling.
 - **Immediate Leave-Room Message Wiping**: Clicking **LEAVE ROOM** (or closing/refreshing the page) immediately clears all displayed chat messages for that user and purges all active message timers. Messages are never saved to `localStorage`, `sessionStorage`, `IndexedDB`, databases, persistent queues, or chat logs, and cannot be restored upon rejoining or refreshing.
 - **1-Hour Real Elapsed Room Expiration**: Every room has an immutable 1-hour lifespan measured using real elapsed time (monotonic performance clocks and synchronized time authorities). When 1 hour passes from creation:

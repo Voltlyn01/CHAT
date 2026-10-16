@@ -1,0 +1,572 @@
+/**
+ * VanishText {Made by SUVX}
+ * Main Application Orchestrator
+ */
+
+(function (window) {
+  'use strict';
+
+  document.addEventListener('DOMContentLoaded', () => {
+    // 1. Initialize UI controller
+    window.VanishUI.init();
+
+    // 2. Initialize Room Session
+    const roomSession = new window.VanishRoomSession();
+
+    // 3. Initialize Chat Controller with DOM elements
+    const chatController = new window.VanishChatController({
+      messageList: document.getElementById('chat-messages-container'),
+      textarea: document.getElementById('chat-input-textarea'),
+      sendBtn: document.getElementById('btn-send-message'),
+      charCount: document.getElementById('chat-char-counter')
+    });
+    chatController.attachRoom(roomSession);
+
+    // Auto-detect join link parameter (?code=XXXX-XXXX-XXXX) for frictionless mobile / cross-network join
+    try {
+      if (typeof window !== 'undefined' && window.location && window.location.search) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const codeFromUrl = urlParams.get('code') || urlParams.get('room');
+        if (codeFromUrl) {
+          const joinCodeInput = document.getElementById('join-code');
+          if (joinCodeInput) {
+            joinCodeInput.value = window.VanishValidation.formatRoomCode(codeFromUrl);
+          }
+          window.VanishUI.showView('join');
+          const joinNickInput = document.getElementById('join-nickname');
+          if (joinNickInput) joinNickInput.focus();
+          window.VanishUI.showToast('Room code detected from link! Enter your nickname to join.', 'info', 4500);
+        }
+      }
+    } catch (e) {}
+
+    // Track active verification details
+    let currentVerificationData = null;
+
+    // Listen for server-synchronized clear chat
+    roomSession.onChatCleared((info) => {
+      chatController.handleClearChat(info.clearedAt, info.clearedBy);
+    });
+
+    // Listen for incoming guest admission request (Creator only)
+    roomSession.onAdmissionRequest((info) => {
+      window.VanishUI.showAdmissionPrompt(info.nickname);
+    });
+
+    // Helper to refresh the left sidebar (room code, participant count, participant list & removal buttons)
+    const refreshSidebar = () => {
+      if (window.VanishUI && typeof window.VanishUI.updateSidebar === 'function') {
+        window.VanishUI.updateSidebar(
+          roomSession.formattedCode,
+          roomSession.participants,
+          roomSession.role === 'creator',
+          (participantId, nickname) => {
+            if (confirm(`Remove ${nickname} from the room? Their access will be immediately revoked.`)) {
+              roomSession.removeParticipant(participantId);
+              window.VanishUI.showToast(`${nickname} removed from room.`, 'info');
+              refreshSidebar();
+            }
+          }
+        );
+      }
+    };
+
+    // 4. Room Session State Handler
+    roomSession.onStateChange((newState, details) => {
+      switch (newState) {
+        case window.VANISH_ROOM_STATES.CREATING:
+          // Loading state handled in form submit
+          break;
+
+        case window.VANISH_ROOM_STATES.WAITING_FOR_PEER:
+          if (window.VanishUI.inviteCodeDisplay) {
+            window.VanishUI.inviteCodeDisplay.textContent = details.formattedCode || '----';
+          }
+          window.VanishUI.showView('invite');
+          window.VanishUI.updateChatStatus('waiting', details.roomType === 'group' ? 'Waiting for members to join...' : 'Waiting for partner to join...', details.transportName);
+          window.VanishUI.updateParticipants(roomSession.localNickname, '', 1, details.maxParticipants, details.roomType);
+          window.VanishUI.setCreatorControls(roomSession.role === 'creator', false);
+          refreshSidebar();
+
+          const btnSubmitCreateEl = document.getElementById('btn-submit-create');
+          if (btnSubmitCreateEl) {
+            btnSubmitCreateEl.disabled = false;
+            btnSubmitCreateEl.textContent = 'CREATE ROOM';
+          }
+          break;
+
+        case window.VANISH_ROOM_STATES.WAITING_FOR_ADMISSION:
+          window.VanishUI.showView('chat');
+          window.VanishUI.updateChatStatus('waiting', 'Waiting for room creator to admit you...', details.transportName || 'Signaling');
+          window.VanishUI.updateParticipants(roomSession.localNickname, 'Host (awaiting admission)');
+          chatController.clearMessages();
+          chatController.addSystemNotice(details.message || 'Waiting for room creator to admit you to the room...');
+          break;
+
+        case window.VANISH_ROOM_STATES.ADMISSION_REQUEST:
+          // Prompt shown via onAdmissionRequest
+          break;
+
+        case window.VANISH_ROOM_STATES.ADMISSION_REJECTED:
+          window.VanishUI.showToast(details.message || 'Admission request declined by host.', 'error', 6000);
+          chatController.clearMessages();
+          roomSession.leaveRoom();
+          window.VanishUI.showView('landing');
+          break;
+
+        case window.VANISH_ROOM_STATES.REMOVED_BY_CREATOR:
+          window.VanishUI.showToast(details.message || 'You were removed from the room by the creator.', 'error', 6000);
+          chatController.clearMessages();
+          roomSession.leaveRoom();
+          window.VanishUI.showView('landing');
+          break;
+
+        case window.VANISH_ROOM_STATES.JOINING:
+          window.VanishUI.showView('chat');
+          window.VanishUI.updateChatStatus('waiting', 'Connecting to secure room...', 'WebRTC P2P');
+          window.VanishUI.updateParticipants(roomSession.localNickname, 'Host (connecting...)');
+          chatController.clearMessages();
+          chatController.addSystemNotice('Connecting to room host via secure peer-to-peer network...');
+          break;
+
+        case window.VANISH_ROOM_STATES.HANDSHAKE:
+          window.VanishUI.showView('chat');
+          window.VanishUI.updateChatStatus('handshake', details.message || 'Exchanging encryption keys...', roomSession.transport ? roomSession.transport.getTransportName() : '');
+          chatController.addSystemNotice(details.message || 'Exchanging ephemeral ECDH cryptographic keys...');
+          break;
+
+        case window.VANISH_ROOM_STATES.CONNECTED:
+          window.VanishUI.showView('chat');
+          currentVerificationData = details.verification;
+
+          window.VanishUI.updateChatStatus('connected', 'End-to-End Encrypted', details.transportName);
+          window.VanishUI.updateParticipants(
+            details.localNickname,
+            details.remoteNickname,
+            details.participantCount,
+            details.maxParticipants,
+            details.roomType
+          );
+          window.VanishUI.setCreatorControls(roomSession.role === 'creator', true);
+          refreshSidebar();
+
+          const typeBadgeConn = document.getElementById('chat-type-badge');
+          if (typeBadgeConn) {
+            if (details.roomType === 'group') {
+              typeBadgeConn.style.display = 'inline-block';
+              typeBadgeConn.textContent = `Group Room (${details.participantCount || 2}/${details.maxParticipants || 10})`;
+            } else {
+              typeBadgeConn.style.display = 'none';
+            }
+          }
+
+          if (window.VanishUI.chatRoomTitle) {
+            window.VanishUI.chatRoomTitle.textContent = details.roomName || (details.roomType === 'group' ? 'Group Room' : 'Private Room');
+          }
+
+          if (window.VanishUI.btnVerifySession && details.verification) {
+            window.VanishUI.btnVerifySession.style.display = 'inline-flex';
+            const sasShort = details.verification.sasCode || 'Verify';
+            window.VanishUI.btnVerifySession.innerHTML = `<span>🛡️</span><span>${sasShort}</span>`;
+          }
+
+          const cipherDesc = details.roomType === 'group' ? 'AES-256-GCM Group Secret' : 'AES-256-GCM / ECDH P-256';
+          chatController.addSystemNotice(`Encrypted session active. E2EE verified (${cipherDesc}).`);
+          break;
+
+        case window.VANISH_ROOM_STATES.PEER_DISCONNECTED:
+          window.VanishUI.updateChatStatus('disconnected', 'Participant Disconnected', roomSession.transport ? roomSession.transport.getTransportName() : '');
+          window.VanishUI.updateParticipants(roomSession.localNickname, '');
+          window.VanishUI.setCreatorControls(roomSession.role === 'creator', false);
+          refreshSidebar();
+          chatController.addSystemNotice(details.message || 'Participant left the conversation.', true);
+          break;
+
+        case window.VANISH_ROOM_STATES.ROOM_FULL:
+          window.VanishUI.showToast(details.message || 'This room is full. Only two participants are allowed.', 'error', 6000);
+          window.VanishUI.showView('landing');
+          break;
+
+        case window.VANISH_ROOM_STATES.EXPIRED:
+          window.VanishUI.showToast(details.message || 'Room session expired. All data permanently destroyed.', 'info', 6000);
+          chatController.clearMessages();
+          window.VanishUI.showView('landing');
+          break;
+
+        case window.VANISH_ROOM_STATES.ERROR:
+          window.VanishUI.showToast(details.error || 'A room error occurred.', 'error', 5000);
+          break;
+
+        case window.VANISH_ROOM_STATES.IDLE:
+          if (window.VanishUI.btnVerifySession) {
+            window.VanishUI.btnVerifySession.style.display = 'none';
+          }
+          window.VanishUI.setCreatorControls(false, false);
+          break;
+      }
+    });
+
+    // 5. Wire Landing Page Navigation
+    const btnOpenCreate = document.getElementById('btn-open-create');
+    const btnOpenJoin = document.getElementById('btn-open-join');
+    const cardCreateAction = document.getElementById('card-create-action');
+    const cardJoinAction = document.getElementById('card-join-action');
+    const btnCancelCreate = document.getElementById('btn-cancel-create');
+    const btnCancelJoin = document.getElementById('btn-cancel-join');
+    const btnPrivacyModal = document.getElementById('btn-privacy-modal');
+    const btnClosePrivacyModal = document.getElementById('btn-close-privacy');
+    const btnCloseVerifyModal = document.getElementById('btn-close-verify');
+
+    const openCreateView = () => {
+      window.VanishUI.showView('create');
+      const nickInput = document.getElementById('create-nickname');
+      if (nickInput) nickInput.focus();
+    };
+
+    const openJoinView = () => {
+      window.VanishUI.showView('join');
+      const codeInput = document.getElementById('join-code');
+      if (codeInput) codeInput.focus();
+    };
+
+    if (btnOpenCreate) {
+      btnOpenCreate.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openCreateView();
+      });
+    }
+    if (cardCreateAction) {
+      cardCreateAction.addEventListener('click', openCreateView);
+    }
+
+    if (btnOpenJoin) {
+      btnOpenJoin.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openJoinView();
+      });
+    }
+    if (cardJoinAction) {
+      cardJoinAction.addEventListener('click', openJoinView);
+    }
+
+    if (btnCancelCreate) {
+      btnCancelCreate.addEventListener('click', () => window.VanishUI.showView('landing'));
+    }
+
+    if (btnCancelJoin) {
+      btnCancelJoin.addEventListener('click', () => window.VanishUI.showView('landing'));
+    }
+
+    if (btnPrivacyModal) {
+      btnPrivacyModal.addEventListener('click', () => {
+        window.VanishUI.openModal(window.VanishUI.modalPrivacy);
+      });
+    }
+
+    if (btnClosePrivacyModal) {
+      btnClosePrivacyModal.addEventListener('click', () => {
+        window.VanishUI.closeModal(window.VanishUI.modalPrivacy);
+      });
+    }
+
+    if (btnCloseVerifyModal) {
+      btnCloseVerifyModal.addEventListener('click', () => {
+        window.VanishUI.closeModal(window.VanishUI.modalVerification);
+      });
+    }
+
+    // 6. Create Room Form Submit
+    const formCreateRoom = document.getElementById('form-create-room');
+    const btnSubmitCreate = document.getElementById('btn-submit-create');
+
+    if (formCreateRoom) {
+      formCreateRoom.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const nickname = document.getElementById('create-nickname').value;
+        const roomName = document.getElementById('create-roomname').value;
+        const transportSelect = document.getElementById('create-transport-mode');
+        const preferredTransport = transportSelect ? transportSelect.value : 'auto';
+
+        const nickVal = window.VanishValidation.validateNickname(nickname);
+        if (!nickVal.valid) {
+          window.VanishUI.showToast(nickVal.error, 'error');
+          return;
+        }
+
+        const maxPartSelect = document.getElementById('create-max-participants');
+        const maxParticipants = maxPartSelect ? parseInt(maxPartSelect.value, 10) : 10;
+        const roomType = maxParticipants > 2 ? 'group' : 'direct';
+
+        btnSubmitCreate.disabled = true;
+        btnSubmitCreate.textContent = 'Generating Secure Room...';
+
+        try {
+          await roomSession.createRoom(nickname, roomName, preferredTransport, roomType, maxParticipants);
+        } catch (err) {
+          console.error('[Create Room Error]', err);
+          window.VanishUI.showToast(err.message || 'Could not create private room.', 'error');
+          btnSubmitCreate.disabled = false;
+          btnSubmitCreate.textContent = 'CREATE ROOM';
+        } finally {
+          if (roomSession.state === window.VANISH_ROOM_STATES.CREATING || roomSession.state === window.VANISH_ROOM_STATES.ERROR || roomSession.state === window.VANISH_ROOM_STATES.IDLE) {
+            btnSubmitCreate.disabled = false;
+            btnSubmitCreate.textContent = 'CREATE ROOM';
+          }
+        }
+      });
+    }
+
+    const selectRoomType = document.getElementById('create-room-type');
+    const roomTypeHint = document.getElementById('room-type-hint');
+    if (selectRoomType) {
+      selectRoomType.addEventListener('change', () => {
+        const isGroup = selectRoomType.value === 'group';
+        if (roomTypeHint) {
+          roomTypeHint.textContent = isGroup
+            ? 'Group conversation for up to 10 participants with AES-256-GCM encryption.'
+            : 'Direct 1-to-1 conversation with pairwise ECDH end-to-end encryption.';
+        }
+        if (btnSubmitCreate) {
+          btnSubmitCreate.textContent = isGroup ? 'CREATE GROUP ROOM' : 'CREATE PRIVATE ROOM';
+        }
+      });
+    }
+
+    // 7. Invitation Screen Buttons
+    if (window.VanishUI.btnCopyCode) {
+      window.VanishUI.btnCopyCode.addEventListener('click', () => {
+        window.VanishUI.copyInvitationCode(roomSession.formattedCode);
+      });
+    }
+
+    if (window.VanishUI.btnCopyLink) {
+      window.VanishUI.btnCopyLink.addEventListener('click', () => {
+        window.VanishUI.copyJoinLink(roomSession.formattedCode);
+      });
+    }
+
+    if (window.VanishUI.btnShareInvite) {
+      window.VanishUI.btnShareInvite.addEventListener('click', () => {
+        window.VanishUI.shareInvitationCode(roomSession.formattedCode);
+      });
+    }
+
+    if (window.VanishUI.btnEnterRoom) {
+      window.VanishUI.btnEnterRoom.addEventListener('click', () => {
+        window.VanishUI.showView('chat');
+        window.VanishUI.updateChatStatus('waiting', 'Waiting for partner to join...', roomSession.transport ? roomSession.transport.getTransportName() : '');
+        window.VanishUI.updateParticipants(roomSession.localNickname, '');
+        chatController.addSystemNotice(`Room ready. Share invitation code: ${roomSession.formattedCode}`);
+      });
+    }
+
+    // 8. Join Room Form Submit & Code Auto-formatting
+    const formJoinRoom = document.getElementById('form-join-room');
+    const joinCodeInput = document.getElementById('join-code');
+    const btnSubmitJoin = document.getElementById('btn-submit-join');
+
+    if (joinCodeInput) {
+      joinCodeInput.addEventListener('input', (e) => {
+        const val = e.target.value;
+        const formatted = window.VanishValidation.formatRoomCode(val);
+        e.target.value = formatted;
+      });
+    }
+
+    if (formJoinRoom) {
+      formJoinRoom.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const rawCode = document.getElementById('join-code').value;
+        const nickname = document.getElementById('join-nickname').value;
+        const transportSelect = document.getElementById('join-transport-mode');
+        const preferredTransport = transportSelect ? transportSelect.value : 'auto';
+
+        const codeVal = window.VanishValidation.validateRoomCode(rawCode);
+        if (!codeVal.valid) {
+          window.VanishUI.showToast(codeVal.error, 'error');
+          return;
+        }
+
+        const nickVal = window.VanishValidation.validateNickname(nickname);
+        if (!nickVal.valid) {
+          window.VanishUI.showToast(nickVal.error, 'error');
+          return;
+        }
+
+        btnSubmitJoin.disabled = true;
+        btnSubmitJoin.textContent = 'Joining & Verifying Slot...';
+
+        try {
+          await roomSession.joinRoom(rawCode, nickname, preferredTransport);
+        } catch (err) {
+          console.error('[Join Room Error]', err);
+          window.VanishUI.showToast(err.message || 'Failed to join room.', 'error', 6000);
+          chatController.clearMessages();
+          roomSession.leaveRoom();
+          window.VanishUI.showView('join');
+          btnSubmitJoin.disabled = false;
+          btnSubmitJoin.textContent = 'JOIN ROOM';
+        } finally {
+          btnSubmitJoin.disabled = false;
+          btnSubmitJoin.textContent = 'JOIN ROOM';
+        }
+      });
+    }
+
+    // 9. Chat Input, Auto-expand & Send Handling
+    const chatTextarea = document.getElementById('chat-input-textarea');
+    const btnSendMessage = document.getElementById('btn-send-message');
+    const charCounter = document.getElementById('chat-char-counter');
+
+    if (chatTextarea) {
+      chatTextarea.addEventListener('input', () => {
+        // Auto-expand textarea height up to 140px
+        chatTextarea.style.height = 'auto';
+        chatTextarea.style.height = Math.min(chatTextarea.scrollHeight, 140) + 'px';
+
+        const len = chatTextarea.value.length;
+        if (charCounter) {
+          charCounter.textContent = `${len} / 2000`;
+          if (len > 1900) {
+            charCounter.classList.add('warning');
+          } else {
+            charCounter.classList.remove('warning');
+          }
+        }
+      });
+
+      chatTextarea.addEventListener('keydown', (e) => {
+        // Enter sends message, Shift+Enter adds newline
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          chatController.handleSendMessage();
+        }
+      });
+    }
+
+    if (btnSendMessage) {
+      btnSendMessage.addEventListener('click', () => {
+        chatController.handleSendMessage();
+      });
+    }
+
+    // 10. Verification SAS Badge Click
+    if (window.VanishUI.btnVerifySession) {
+      window.VanishUI.btnVerifySession.addEventListener('click', () => {
+        window.VanishUI.showVerificationDetails(
+          currentVerificationData,
+          roomSession.localNickname,
+          roomSession.remoteNickname
+        );
+      });
+    }
+
+    // 11. Leave Room Button
+    if (window.VanishUI.btnLeaveRoom) {
+      window.VanishUI.btnLeaveRoom.addEventListener('click', () => {
+        if (confirm('Leave room and permanently destroy all active chat messages and session keys?')) {
+          chatController.clearMessages();
+          roomSession.leaveRoom();
+          window.VanishUI.showToast('You left the room. Session keys and messages wiped.', 'info');
+          window.VanishUI.showView('landing');
+        }
+      });
+    }
+
+    // 11b. CLEAR CHAT FOR BOTH Button (Synchronized across both devices)
+    if (window.VanishUI.btnClearChat) {
+      window.VanishUI.btnClearChat.addEventListener('click', () => {
+        if (confirm('Clear all chat messages for both participants? This cannot be undone.')) {
+          roomSession.clearChatForBoth();
+          window.VanishUI.showToast('Chat cleared for both participants.', 'info');
+        }
+      });
+    }
+
+    // 11c. Creator Control: REMOVE GUEST Button
+    if (window.VanishUI.btnRemoveGuest) {
+      window.VanishUI.btnRemoveGuest.addEventListener('click', () => {
+        if (confirm('Remove guest from the room? Their access will be immediately revoked.')) {
+          roomSession.removeGuest();
+          window.VanishUI.setCreatorControls(true, false);
+          chatController.addSystemNotice('You removed the guest from the room. You can invite another guest.');
+          window.VanishUI.showToast('Guest removed from room.', 'info');
+        }
+      });
+    }
+
+    // 11d. Admission Request Modal & Sidebar Buttons
+    if (window.VanishUI.btnAdmitGuest) {
+      window.VanishUI.btnAdmitGuest.addEventListener('click', () => {
+        window.VanishUI.hideAdmissionPrompt();
+        roomSession.admitGuest();
+        window.VanishUI.showToast('Guest admitted to the room.', 'success');
+        refreshSidebar();
+      });
+    }
+
+    if (window.VanishUI.btnRejectGuest) {
+      window.VanishUI.btnRejectGuest.addEventListener('click', () => {
+        window.VanishUI.hideAdmissionPrompt();
+        roomSession.rejectGuest();
+        window.VanishUI.showToast('Guest admission declined.', 'info');
+        refreshSidebar();
+      });
+    }
+
+    const btnSidebarAdmit = document.getElementById('btn-sidebar-admit');
+    if (btnSidebarAdmit) {
+      btnSidebarAdmit.addEventListener('click', () => {
+        window.VanishUI.hideAdmissionPrompt();
+        roomSession.admitGuest();
+        window.VanishUI.showToast('Guest admitted to the room.', 'success');
+        refreshSidebar();
+      });
+    }
+
+    const btnSidebarReject = document.getElementById('btn-sidebar-reject');
+    if (btnSidebarReject) {
+      btnSidebarReject.addEventListener('click', () => {
+        window.VanishUI.hideAdmissionPrompt();
+        roomSession.rejectGuest();
+        window.VanishUI.showToast('Guest admission declined.', 'info');
+        refreshSidebar();
+      });
+    }
+
+    // 11e. Sidebar Copy Code & Mobile Drawer Toggle
+    const btnSidebarCopy = document.getElementById('btn-sidebar-copy');
+    if (btnSidebarCopy) {
+      btnSidebarCopy.addEventListener('click', () => {
+        window.VanishUI.copyInvitationCode(roomSession.formattedCode);
+      });
+    }
+
+    const btnToggleSidebar = document.getElementById('btn-toggle-sidebar');
+    const chatSidebar = document.getElementById('chat-sidebar');
+    if (btnToggleSidebar && chatSidebar) {
+      btnToggleSidebar.addEventListener('click', () => {
+        chatSidebar.classList.toggle('mobile-open');
+      });
+    }
+
+    // 12. Privacy Blur Toggle in Header
+    const togglePrivacyBlur = document.getElementById('toggle-privacy-blur');
+    if (togglePrivacyBlur) {
+      togglePrivacyBlur.addEventListener('change', (e) => {
+        window.VanishUI.privacyBlurEnabled = e.target.checked;
+        window.VanishUI.showToast(`Privacy blur shield ${e.target.checked ? 'enabled' : 'disabled'}.`, 'info');
+      });
+    }
+
+    // 13. Immediate cleanup on tab close, page refresh, or navigation
+    window.addEventListener('beforeunload', () => {
+      chatController.clearMessages();
+      roomSession.leaveRoom();
+    });
+    window.addEventListener('pagehide', () => {
+      chatController.clearMessages();
+      roomSession.leaveRoom();
+    });
+  });
+})(window);

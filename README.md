@@ -7,8 +7,11 @@ VanishText is a temporary, private, text-only chat website built strictly with *
 
 ## 1. Key Features
 
-- **1-to-1 Private & Group Chat Modes**: Choose between strict **1-to-1 Direct Chat** (exactly 2 participants max) or **Group Chat** (allowing more than two people, up to 10 participants per room in a WebRTC mesh).
-- **Genuine End-to-End Encryption**: Ephemeral Elliptic Curve Diffie-Hellman (**ECDH P-256**) key exchange with **HKDF (SHA-256)** for 1-to-1 chat, and derived **AES-256-GCM** authenticated group keys with fresh 96-bit CSPRNG IVs on every message.
+- **Strict 1-to-1 Direct Chat & Sequential Guest Admission**: Support conversations between exactly one room creator and one admitted guest at a time. Third participants are rejected while the room is occupied. When a guest leaves or is removed, the creator can admit a new guest.
+- **Cross-Network Communication (STUN & TURN Relays)**: Seamless, reliable WebRTC connections across different Wi-Fi networks, cellular/mobile data (CGNAT), different ISPs, and VPNs with fallback TURN relay support (ports 80 & 443 TCP/UDP/TURNS) that preserves genuine end-to-end encryption.
+- **CLEAR CHAT FOR BOTH**: A dedicated, prominent button inside the chat room that prompts for confirmation and immediately wipes all displayed messages from both participants' screens, memory, and DOM, with server-side synchronization and delayed message cutoff filtering.
+- **Creator Controls**: The room creator can admit the invited guest into the room or remove them at any time. Removing a guest immediately revokes their session token and blocks reconnection with stale credentials.
+- **Genuine End-to-End Encryption**: Ephemeral Elliptic Curve Diffie-Hellman (**ECDH P-256**) key exchange with **HKDF (SHA-256)** and **AES-256-GCM** authenticated encryption with fresh 96-bit CSPRNG IVs on every message.
 - **Short Authentication String (SAS)**: 6-digit numeric verification code and 4-symbol visual emoji fingerprint to verify session authenticity and eliminate Man-in-the-Middle (MITM) attacks.
 - **Automatic 15-Minute Message Deletion**: Every message automatically disappears from all participants' chat screens exactly 15 minutes after it was sent. Each message operates on its own independent 15-minute timer based on real elapsed time.
 - **Leave Room Instant Clearing**: When any user leaves the room (or refreshes/closes the page), all displayed chat messages are cleared immediately for that user. Previous messages are never restored upon rejoining or refreshing.
@@ -16,11 +19,12 @@ VanishText is a temporary, private, text-only chat website built strictly with *
 - **Create a New Room**: Expired rooms can never be reactivated. To converse again, the creator must create a completely new room with a new invitation code.
 - **Zero Chat History & Zero Persistence**: Messages exist exclusively in transient memory for their 15-minute lifespan. No chat text is ever written to `localStorage`, `sessionStorage`, `IndexedDB`, cookies, queues, or remote databases.
 - **Strict Text-Only Policy**: Only plain text and Unicode emojis are accepted. Images, video files, voice messages, audio calls, video calls, screen capture, and file uploads are strictly forbidden and structurally excluded.
-- **Honest Privacy Disclosures**: VanishText maintains no chat history, but does not falsely claim every trace is erased from all systems worldwide. Unavoidable infrastructure metadata (IPs, connection timestamps, ICE routing packets) processed by signaling brokers and STUN servers is disclosed.
+- **Honest Privacy Disclosures**: VanishText maintains no chat history, but does not falsely claim every trace is erased from all systems worldwide. Unavoidable infrastructure metadata (IPs, connection timestamps, ICE routing packets) processed by signaling brokers and STUN/TURN relays is disclosed.
 - **Privacy Deterrents**: Privacy Shield auto-blur upon window blur or document minimization, along with keyboard shortcut interception (F12, PrintScreen, Ctrl+Shift+I/J/C, Ctrl+U, Ctrl+S, Ctrl+P).
-- **Dual Communication Infrastructure**:
-  1. **WebRTC DataChannel via PeerJS Cloud**: True cross-device, direct peer-to-peer data channel over the internet using STUN.
-  2. **BroadcastChannel Local Dev Mode**: Built-in offline testing across browser tabs on the same machine without internet dependencies.
+- **Multi-Transport Support**:
+  1. **Server Signaling Transport (Public Cross-Network WebRTC + STUN/TURN)**: Built-in WebSocket signaling coordinator and TURN credentials service.
+  2. **PeerJS WebRTC**: Public PeerJS signaling broker for direct peer-to-peer data channels.
+  3. **BroadcastChannel Local Dev Mode**: Built-in offline testing across browser tabs on the same machine without internet dependencies.
 
 ---
 
@@ -84,38 +88,41 @@ A static frontend running on two isolated devices (e.g. Alice's phone and Bob's 
 
 ### How to Run Locally
 
-You can open `index.html` directly in any modern browser, or serve it with any standard static HTTP file server:
+You can run the built-in signaling and TURN relay coordination server:
 
 ```powershell
-# Using Python 3's built-in server
-python -m http.server 8080
+# Run the integrated static server, TURN credentials provider & signaling coordinator
+node server.js
 
-# Or using npx serve / live-server
-npx -y serve -p 8080 .
+# Or with custom port
+$env:PORT="8080"; node server.js
 ```
 
 Open your browser to:
-`http://localhost:8080`
+`http://localhost:8080` (or your configured port/domain).
 
 ---
 
 ## 5. How It Works (Step-by-Step)
 
-1. **Room Creation**:
+1. **Room Creation & Creator Authentication**:
    - Alice clicks **CREATE ROOM**, enters nickname `Alice`, and clicks **CREATE PRIVATE ROOM**.
    - VanishText generates a CSPRNG invitation code using `crypto.getRandomValues()` (e.g., `AB7K-M9QP-X4RT`).
    - Alice generates an ephemeral ECDH P-256 keypair in browser memory.
+   - Alice receives a private 256-bit unguessable `creatorSecret` proving room ownership on the signaling server.
    - Alice is registered as Participant 1.
 2. **Invitation Sharing**:
    - Alice clicks **COPY ROOM CODE** (or **SHARE INVITATION**) to copy `AB7K-M9QP-X4RT`.
    - Alice privately shares the code with Bob out-of-band.
    - Alice clicks **ENTER ROOM**.
-3. **Joining**:
-   - Bob opens VanishText on another device, clicks **JOIN ROOM**, enters `AB7K-M9QP-X4RT` and nickname `Bob`.
+3. **Joining & Creator Admission**:
+   - Bob opens VanishText on another device or network, clicks **JOIN ROOM**, enters `AB7K-M9QP-X4RT` and nickname `Bob`.
    - Bob generates an ephemeral ECDH P-256 keypair.
-   - Bob connects to Alice's room.
-4. **Strict Admission Control (Max 2 Participants)**:
-   - If a third person (Charlie) attempts to join with the same code while Alice and Bob are connected, the host rejects the connection with: `"This room is full. Only two participants are allowed."`
+   - Bob requests admission from the room creator.
+   - Alice receives an admission prompt: `"Bob would like to enter the room. Do you want to admit this guest?"`
+   - Alice clicks **ADMIT GUEST** (or **REJECT**).
+4. **Strict Admission Control (Max 2 Participants & Rejection of 3rd Participant)**:
+   - While Alice and Bob occupy the room, if a third person (Charlie) attempts to join with the same code, the server immediately rejects Charlie with: `"This room is full. Only two participants are allowed."`
 5. **Cryptographic Key Agreement (ECDH)**:
    - Alice and Bob exchange their public keys over the transport.
    - Both independently derive the shared 256-bit master secret via ECDH.
@@ -123,11 +130,16 @@ Open your browser to:
      - An **AES-256-GCM** encryption key.
      - A 6-digit **Short Authentication String (SAS)** and 4-emoji visual fingerprint.
    - Both verify the matching SAS code (`[ 🛡️ 849 204 ]`).
-6. **Encrypted Real-Time Messaging**:
+6. **Encrypted Real-Time Messaging (Direct & TURN Relay)**:
    - Every text message is encrypted using AES-256-GCM with a fresh 96-bit CSPRNG IV.
    - Additional Authenticated Data (AAD) binds `roomId`, `senderId`, and a strictly monotonic sequence number (`seq`) to protect against tampering, replay attacks, and cross-room message injection.
-   - Only ciphertext travels over the wire.
-7. **Room Destruction, Expiration & Automatic Message Deletion**:
+   - Messages travel directly peer-to-peer or via authenticated TURN relay when traversing symmetric NATs or restrictive firewalls.
+   - Genuine E2EE is strictly preserved across all transports; signaling and TURN servers only ever route encrypted ciphertext.
+7. **CLEAR CHAT FOR BOTH & Creator Removal**:
+   - Either participant can click **CLEAR CHAT FOR BOTH** in the header. Upon confirmation, all displayed messages are wiped immediately from memory and the DOM for both users, and the timestamp cutoff drops any delayed in-flight messages.
+   - The creator can click **REMOVE GUEST** at any time. This immediately revokes the guest's session token and prevents reconnection with stale credentials.
+   - After a guest leaves or is removed, the creator can admit a different guest, but never more than one concurrent guest.
+8. **Room Destruction, Expiration & Automatic Message Deletion**:
    - Every message automatically disappears from both users' screens exactly 15 minutes after it was sent on its own independent timer.
    - When a participant clicks **LEAVE ROOM** or closes/refreshes the tab, all displayed messages are wiped immediately for that user, cryptographic keys are zeroized, and state is reset. Previous messages are never restored.
    - Rooms automatically expire after exactly 1 hour from creation in real elapsed time. Upon expiration, both users are disconnected, the chat interface is cleared, the invitation code is invalidated, and the room is permanently disabled. Never reactivated.
@@ -150,19 +162,28 @@ Open your browser to:
 
 ## 7. Running the Automated Test Suite
 
-VanishText includes an automated test runner verifying all 50 specification requirements from Section 20.
+VanishText includes both an automated Node.js CLI runner and an interactive browser test runner verifying all 84 security, cryptography, and network requirements.
 
+### Run via Command Line
+```powershell
+node test/cli-runner.js
+node test/integration-test.js
+```
+
+### Run in Browser
 1. Open `test/runner.html` in your browser.
-2. The test suite automatically executes all 50 unit and integration tests covering:
+2. The test suite automatically executes all 84 unit and integration tests covering:
    - Landing page rendering and actions
    - Room creation and validation
    - Cryptographically secure invitation codes
-   - Admission control and strict 2-participant limits
-   - Real-time messaging and sanitization
-   - End-to-end encryption (ECDH, HKDF, AES-GCM, SAS)
+   - WebRTC STUN/TURN cross-network relay configuration
+   - CLEAR CHAT FOR BOTH and replay prevention
+   - Strict 1-to-1 admission and third-participant rejection
+   - Creator controls: admission, guest removal, and stale token revocation
+   - Genuine E2EE over relay transports without plaintext fallback
+   - 15-minute message deletion & 1-hour room expiration lifecycle
    - Zero-persistence guarantees
-   - Privacy and permissions enforcement
-3. Click **RERUN ALL 50 TESTS** to repeat execution.
+3. Click **RERUN ALL TESTS** to repeat execution.
 
 ---
 
